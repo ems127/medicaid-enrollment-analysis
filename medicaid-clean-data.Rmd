@@ -1,0 +1,488 @@
+---
+title: "Medicaid Enrollment Data Analysis"
+author: "Evelynn Michaud-Spangler"
+date: "2026-08-5"
+output:
+  pdf_document: 
+   latex_engine: xelatex
+---
+
+# 1. Data Preparation
+
+Medicaid enrollment data from the Centers for Medicare & Medicaid Services (CMS) were cleaned and merged with annual state population estimates from the U.S. Census Bureau between 2016 and 2025. Beginning in March of 2020, the Families First Coronavirus Response Act (FFCRA) began requiring states to provide continuous coverage to most Medicaid beneficiaries who were enrolled in the program as of or after March 18, 2020.as a condition of receiving a temporary 6.2 percentage point increase in Federal Medical Assistance Percentage. The continuous coverage requirement ended, however, on March 31, 2023. Therefore, the post-unwinding period is defined as reporting dates on or before April 1, 2023. Medicaid expansion status was also used to distinguish between states that have expanded Medicaid and those that have not. States that have expanded Medicaid allow individuals to qualify based on income alone if their household income is below 138% of the Federal Poverty Line, and prior to the expansion (pre-2014), the federal government based their annual funding on the per capita income of the state’s residents relative to the US average income. 
+
+```{r setup}
+# Medicaid & CHIP Enrollment — Cleaning 
+library(dplyr)
+library(tidyr)
+library(readr)
+library(stringr)
+library(lubridate)
+library(writexl)
+library(readxl)
+library(ggplot2)
+library(lmtest)
+library(sandwich)
+library(forecast)
+
+#Load uncleaned enrollment file
+raw <- read_csv("enrollment.csv", show_col_types = FALSE)
+
+#Keep only the finalized rows (drops the duplicate "Preliminary" rows)
+clean <- raw %>%
+  filter(`Final Report` == "Y")
+
+#Drop all the "- footnotes" columns
+footnote_cols <- names(clean)[str_detect(names(clean), "- footnotes$")]
+clean <- clean %>% select(-all_of(footnote_cols))
+
+#Turn "Reporting Period" (e.g. 202405) into a date
+clean <- clean %>%
+  mutate(
+    reporting_date = ymd(paste0(`Reporting Period`, "01")),
+    year = year(reporting_date),
+    month = month(reporting_date)
+  )
+
+#restrict to a consistent reporting window because (pre-2017 data is very sparse across most columns)
+clean <- clean %>% filter(reporting_date >= as.Date("2017-01-01"))
+
+#Rename a few columns to simpler names
+clean <- clean %>%
+  rename(
+    state_abbr = `State Abbreviation`,
+    state_name = `State Name`,
+    expanded_medicaid = `State Expanded Medicaid`,
+    total_enrollment = `Total Medicaid and CHIP Enrollment`,
+    medicaid_enrollment = `Total Medicaid Enrollment`,
+    chip_enrollment = `Total CHIP Enrollment`,
+    child_enrollment = `Medicaid and CHIP Child Enrollment`,
+    adult_medicaid_enrollment = `Total Adult Medicaid Enrollment`
+  )
+
+#Flag for the 2023 unwinding period (useful for the interrupted time series analysis / dashboard filter)
+clean <- clean %>%
+  mutate(post_unwinding = reporting_date >= as.Date("2023-04-01"))
+
+#Write cleaned file
+write_xlsx(clean, "cleaned_enrollment.xlsx")
+
+```
+
+```{r census}
+
+#Load in 2010-2020 data set (keeping only 2010-2019 because 2020 is an estimate here)
+census2020 <- read_xlsx("Census2010-2020.xlsx")
+census2020 <- census2020[-(1:2), -(2:10)]
+census2020 <- census2020[,-(5:6)]
+names(census2020)[1] <- "State"
+names(census2020)[2:4] <- c("2017", "2018", "2019")
+census2020 <- census2020[-(1:6),]
+
+#Load in 2020-2025 data set
+census2025 <- read_xlsx("Census2020-2025.xlsx")
+census2025 <- census2025[-(1:2), -2]
+names(census2025)[2:7] <- c("2020", "2021", "2022", "2023", "2024", "2025")
+names(census2025)[1] <- "State"
+census2025 <- census2025[-(1:6),]
+
+#Join 2010-2019 data to 2020-2025 data set
+census2010_2025 <- right_join(census2020, census2025, by = "State")
+
+
+#Drop extraneous rows (regions, endnotes)
+census2010_2025 <- census2010_2025[-(52:59),]
+
+#Remove extraneous period before state names
+census2010_2025 <- census2010_2025 %>%
+  mutate(State = str_remove(State, "^\\.+"))
+
+#Pivot to reshape file longer
+census_longer <- census2010_2025 %>%
+  mutate(across(`2017`:`2025`, as.character)) %>% #force all columns to common type
+  pivot_longer(
+    cols = `2017`:`2025`,
+    names_to = "Year",
+    values_to = "Population",
+  ) %>%
+  mutate(Year = as.integer(Year))
+
+write_xlsx(census_longer, "census2010-2025popdata.xlsx")
+
+#Convert Population variable to numeric from character
+census_longer <- census_longer %>%
+  mutate(Population = parse_number(Population))
+
+#Left join Census population data to Medicaid enrollment data 
+medicaid_census <- clean %>%
+  left_join(census_longer, by = c("state_name" = "State", "year" = "Year")) %>%
+  mutate(med_enroll_per_1000 = round((medicaid_enrollment/Population)*1000, 0)) #Create new Medicaid enrollment per 1000 residents variable
+```
+
+# 2. Descriptive Analysis
+
+I first analyzed state Medicaid enrollment trends per 1,000 residents by Medicaid expansion status to assess differences in enrollment between expansion and non-expansion states over time.
+
+```{r descriptive}
+
+
+#Table showing annual enrollment trends by Medicaid Expansion status
+descriptive_tab <- medicaid_census %>%
+  group_by(year, expanded_medicaid) %>%
+  summarize(mean_enrollment = mean(med_enroll_per_1000, na.rm = T),
+            .groups = "drop")
+descriptive_tab
+
+#Graph showing annual enrollment trends by Medicaid Expansion status
+
+plot1 <- ggplot(descriptive_tab,
+                aes(x = year,
+                    y = mean_enrollment,
+                    color = expanded_medicaid)) +
+  geom_line() +
+  geom_point() +
+  labs(x = "Year",
+      y = "Average Medicaid Enrollments per 1000 Residents",
+      color = "Medicaid Expansion Status") +
+  scale_color_manual(
+    values = c(
+      "N" = "#E69F00",
+      "Y" = "#0072B2"
+    ),
+    labels = c(
+      "Y" = "Expansion States",
+      "N" = "Non-Expansion States"
+    )
+  ) +
+  theme_classic()
+plot1
+
+#Calculate monthly trends
+monthly_trends <- medicaid_census %>%
+  group_by(reporting_date, expanded_medicaid) %>%
+  summarize(mean_enrollment = mean(med_enroll_per_1000, na.rm = T),
+            .groups = "drop")
+
+#Plot annual enrollment using monthly reporting dates, adding x-intercept with unwinding date for DiD
+plot2 <- ggplot(monthly_trends,
+       aes(x = reporting_date,
+           y = mean_enrollment, 
+           color = expanded_medicaid)) +
+  geom_line(linewidth = 1) +
+  geom_vline(
+    xintercept = as.Date("2023-04-01"),
+    linetype = "dashed"
+  ) +
+  scale_x_date(
+    date_breaks = "1 year",
+    date_labels = "%Y",
+  ) +
+  scale_color_manual(values = c(
+      "N" = "#E69F00",
+      "Y" = "#0072B2"
+    ),
+    labels = c(
+      "N" = "Non-Expansion States",
+      "Y" = "Expansion States"
+    )
+  ) +
+  labs(
+    x = "Year",
+    y = "Average Medicaid Enrollment Per 1000 Residents",
+    title = "State Medicaid Enrollment Trends by Expansion Status Pre- and Post-Unwinding",
+    color = "Medicaid Expansion Status",
+    subtitle = "Dashed line represents the beginning of the Medicaid unwinding date (April 1, 2023)"
+  ) +
+  theme_classic()
+plot2
+
+#Descriptive Statistics
+descriptive_summary <- medicaid_census %>%
+  mutate(
+    expansion_status = if_else(
+    expanded_medicaid == "Y",
+    "Expansion States",
+    "Non-Expansion States"
+  ),
+  period = if_else(
+    post_unwinding,
+    "Post-Unwinding",
+    "Pre-Unwinding")
+  ) %>%
+  group_by(expansion_status, period) %>%
+  summarize(
+    mean_enrollment = mean(med_enroll_per_1000, na.rm = T),
+    .groups = "drop"
+  )
+  
+descriptive_summary
+
+descrip_summary_wide <- descriptive_summary %>%
+  pivot_wider(
+    names_from = period,
+    values_from = mean_enrollment
+  ) %>%
+  mutate(
+    change = `Post-Unwinding` - `Pre-Unwinding`
+  )
+
+descrip_summary_wide
+
+#Difference-in-Differences Descriptive Summary
+
+did_descriptive <- descrip_summary_wide %>%
+  summarize(
+    expansion_change = `Post-Unwinding`[expansion_status == "Expansion States"] - 
+      `Pre-Unwinding`[expansion_status == "Expansion States"],
+    nonexpansion_change = `Post-Unwinding`[expansion_status == "Non-Expansion States"] - 
+      `Pre-Unwinding`[expansion_status == "Non-Expansion States"],
+    diff_in_diff = expansion_change - nonexpansion_change
+  )
+
+did_descriptive
+```
+
+# 3. Difference-in-Difference Analysis
+
+Research Question: Is there an association between the beginning of the Medicaid unwinding on April 1, 2023 and change in the difference in Medicaid enrollment per 1000 residents between Medicaid expansion and non-expansion states?
+
+To address this question, I use a difference-in-differences (DiD) approach to compare changes in Medicaid enrollment per 1000 residents between expansion and non-expansion states before and after the unwinding period. The analysis uses April 1, 2023 as the beginning of the post-unwinding period. 
+
+```{r regression}
+
+#DiD regression
+model1 <- lm(
+  med_enroll_per_1000 ~ expanded_medicaid * post_unwinding,
+  data = medicaid_census
+)
+summary(model1)
+
+#DiD regression controlling for population size
+model2 <- lm(
+  med_enroll_per_1000 ~ expanded_medicaid * post_unwinding + log(Population), 
+  data = medicaid_census)
+summary(model2)
+
+
+#Enrollment trends pre-unwinding between expansion and non-expansion states
+pre_trends <- medicaid_census %>%
+  filter(post_unwinding == FALSE) %>%
+  group_by(reporting_date, expanded_medicaid) %>%
+  summarise(
+    mean_enrollment = mean(med_enroll_per_1000, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+#Plot to check parallel trends of pre-unwinding enrollments
+plot3 <- ggplot(
+  pre_trends,
+  aes(
+    x = reporting_date,
+    y = mean_enrollment,
+    color = expanded_medicaid
+  )
+) +
+  geom_line(linewidth = 1) +
+  scale_x_date(
+    date_breaks = "1 year",
+    date_labels = "%Y"
+  ) +
+  scale_color_manual(
+    values = c(
+      "N" = "#E69F00",
+      "Y" = "#0072B2"
+    ),
+    labels = c(
+      "N" = "Non-Expansion States",
+      "Y" = "Expansion States"
+    )
+  ) +
+  labs(
+    x = "Year",
+    y = "Average Medicaid Enrollment per 1,000 Residents",
+    title = "Pre-Unwinding Medicaid Enrollment Trends",
+    color = "Medicaid Expansion Status"
+  ) +
+  theme_classic()
+plot3
+
+#Creating monthly time variable for pre and post-unwinding trends analysis
+pre_data <- medicaid_census %>%
+  filter(reporting_date < as.Date("2023-04-01")) %>%
+  arrange(reporting_date) %>%
+  mutate(month = as.numeric(
+    difftime(
+      reporting_date,
+      min(reporting_date),
+      units = "days"
+    )
+  ) / 30.44
+)
+
+#Regression testing if there is a significant difference in enrollment trends pre-unwinding period between expansion and non-expansion states
+pretrends_model <- lm(
+  med_enroll_per_1000 ~ expanded_medicaid * month,
+  data = pre_data
+)
+summary(pretrends_model)
+
+#Regression testing for statistically signficiant differences in enrollment trends pre-unwinding between expansion and non-expansion states after controlling for population size
+pretrend_model2 <- lm(
+  med_enroll_per_1000 ~ expanded_medicaid * month + log(Population),
+  data = pre_data
+)
+summary(pretrend_model2)
+
+#State-clustered standard errors analysis since there are multiply monthly observations per state
+coeftest(
+  pretrend_model2,
+  vcov = vcovCL,
+  cluster = ~ state_name
+)
+
+coeftest(model1,
+         vcov = vcovCL, 
+         cluster = ~ state_name)
+
+coeftest(model2, 
+         vcov = vcovCL,
+         cluster = ~ state_name)
+```
+Model 1: Prior to the unwinding period, expansion states had approximately 83.9 more Medicaid enrollees per 1000 residents than non-expansion states. Without controlling for population size, the Medicaid enrollment gap between expansion and non-expansion states narrowed by approximately 14.4 enrollees per 1000  residents (β = −14.41, p < 0.001) following the beginning of the unwinding period, leaving an estimated difference of approximately 69.5 enrollees per 1000. Among non-expansion states, enrollment increased by approximately 5.9 enrollees per 1000 residents post-unwinding, however this change was not statistically significant at the 0.05 level. 
+
+Model 2: Prior to the unwinding period, states that expanded Medicaid enrolled approximately 85 more enrollees per 1,000 residents than non-expansion states, controlling for state population. Following the beginning of the unwinding period, the Medicaid enrollment gap between expansion and non-expansion states narrowed by approximately 13.5 enrollees per 1,000 residents (β = −13.47, p < 0.001), controlling for state population. This left an estimated difference of approximately 71.5 enrollees per 1,000 residents between expansion and non-expansion states in the post-unwinding period. The estimated difference-in-differences was similar across model 1 and 2, decreasing from 14.4 to 13.5 enrollees per 1,000 after controlling for state population.
+
+Prior to the beginning of the unwinding period, Medicaid enrollment in expansion and non-expansion states followed broadly similar trajectories, particularly from 2021 through early 2023. Although the enrollment levels remained consistently higher among expansion states and the gap varied somewhat over the pre-unwinding period, both groups experienced similar overall movements in enrollment. This provides some support for the parallel trends assumption. Regression analysis further confirmed that before the beginning of the unwinding period, the monthly change in Medicaid enrollment did not differ significantly between expansion and non-expansion states (β = -0.05, p = 0.55), providing no evidence of differential pre-unwinding trends. This holds true even after controlling for population size (β = -0.04, p = 0.64). 
+
+To further assess the parallel-trends assumption underlying the pre/post comparison, I tested whether expansion and non-expansion states were on different enrollment trajectories before the unwinding began using state clustered analysis. The interaction between expansion status and time was small and not statistically significant (β = -0.04, p = 0.84, state-clustered standard errors), providing no evidence that the two groups were diverging prior to the policy change. This suggests the narrowing of the enrollment gap post-unwinding may be attributable to the policy. 
+
+Similarly to model 1, when adding a state cluster standard error analysis for model 1, the gap between expansion and non-expansion states narrowed by 14.4 enrollees per 1000 residents after the unwinding period began, and this change was not statistically significant at the 0.05 level (p = .082). This holds true when controlling for population size. 
+
+# 4. Sensitivity Analysis
+```{r sensitivity}
+#Sensitivity check #1: exclude buffer zone around the April 1, 2023 cutoff
+
+buffer_data <- medicaid_census %>%
+  filter(reporting_date < as.Date("2023-02-01") | reporting_date >= as.Date("2023-06-01"))
+
+model_buffer <- lm(
+  med_enroll_per_1000 ~ expanded_medicaid * post_unwinding + log(Population),
+  data = buffer_data
+)
+
+coeftest(model_buffer, vcov = vcovCL, cluster = ~ state_name)
+
+# Sensitivity check 2: alternate cutoff date (e.g. one quarter later)
+alt_data <- medicaid_census %>%
+  mutate(post_unwinding_alt = reporting_date >= as.Date("2023-07-01"))
+
+model_alt <- lm(
+  med_enroll_per_1000 ~ expanded_medicaid * post_unwinding_alt + log(Population),
+  data = alt_data
+)
+coeftest(model_alt, vcov = vcovCL, cluster = ~ state_name)
+```
+
+I conducted  a sensitivity analysis as a robustness check by excluding a few transition months around the unwinding cutoff date (February-May 2023) to account for uncertainty in exactly when redetermination began in each state. The estimated narrowing of the expansion/non-expansion gap remained similar in size (-13.5 compared to -14.4 enrollees per 1000 residents), and the p-value was statistically insignificant at both the 0.05 and 0.1 levels. This suggests the direction and magnitude of the finding are not highly sensitive to the exact cutoff date, though the statistical significance of the interaction remains borderline. 
+
+# 5. Forecasting Enrollment
+
+```{r forecast}
+
+#Create two group-level time series
+group_timeseries <- medicaid_census %>%
+  group_by(reporting_date, expanded_medicaid) %>%
+  summarize(total_enrollment = sum(medicaid_enrollment, na.rm = T),
+            .groups = "drop"
+  ) %>%
+  arrange(reporting_date)
+
+#Create an object for forecast time using post-unwinding period only
+forecast_data <- group_timeseries %>%
+  filter(reporting_date >= as.Date("2023-04-01"))
+
+#Time-Series forecast object for Expansion States
+expansion_timeseries <- forecast_data %>%
+  filter(expanded_medicaid == "Y") %>%
+  pull(total_enrollment) %>%
+  ts(frequency = 12, start = c(2023, 4))
+
+#Non-Expansion States Time-Series Forecast Object
+nonexpansion_timeseries <- forecast_data %>%
+  filter(expanded_medicaid == "N") %>%
+  pull(total_enrollment) %>%
+  ts(frequency = 12, start = c(2023, 4))
+
+#Fitting the model - pattern of historical data
+fit_y <- ets(expansion_timeseries)
+fit_n <- ets(nonexpansion_timeseries)
+
+#Generating forecasts 12 months in future
+fc_y <- forecast(fit_y, h = 12)
+fc_n <- forecast(fit_n, h = 12)
+
+#Combined table for forecasts
+build_fc_df <- function(fc, group_label, last_date) {
+  data.frame(
+    reporting_date = seq(last_date + 30, by = "month", length.out = 12),
+    expanded_medicaid = group_label,
+    point_forecast = as.numeric(fc$mean),
+    lower_80 = as.numeric(fc$lower[,1]),
+    upper_80 = as.numeric(fc$upper[,1])
+  )
+}
+
+#Stacking forecast results in a table
+last_date <- max(forecast_data$reporting_date)
+
+fc_combined <- bind_rows(
+  build_fc_df(fc_y, "Y", last_date),
+  build_fc_df(fc_n, "N", last_date)
+)
+
+print(fc_combined)
+
+#Plot forecasts
+
+plot4 <- ggplot() +
+  geom_line(data = group_timeseries, 
+            aes(x = reporting_date,
+                y = total_enrollment,
+                color = expanded_medicaid))+
+  geom_line(data = fc_combined, 
+            aes(x = reporting_date,
+                y = point_forecast,
+                color = expanded_medicaid),
+            linetype = "dashed") +
+  geom_ribbon(data = fc_combined, 
+                          aes(x = reporting_date,
+                              ymin = lower_80, 
+                              ymax = upper_80,
+                              fill = expanded_medicaid),
+                          alpha = 0.1)+
+  scale_color_manual(values = c(
+    "N" = "#E69F00",
+    "Y" = "#0072B2"
+  ),
+  labels = c(
+    "N" = "Non-Expansion States",
+    "Y" = "Expansion States"
+  ),
+  name = "Medicaid Expansion Status"
+) +
+  scale_fill_manual(
+    values = c("N" = "#E69F00", "Y" = "#0072B2")) +
+  guides (fill = "none") +
+  scale_linetype_manual(values = c("Forecast" = "dashed"), name = NULL) +
+  scale_y_continuous(labels = scales::comma) +
+  labs(y = "Total Medicaid Enrollment",
+       x = "Year",
+       title = "Medicaid Enrollment Time-Series Forecast by State Medicaid Expansion Status") +
+  theme_classic()
+
+plot4
+```
+
+Forecast: To project near-term Medicaid enrollment caseloads, I fit an automated exponential smoothing model (ETS) separately for expansion and non-expansion states, trained on the post-unwinding period (April 2023 onward) to reflect the current policy environment rather than the atypical continuous-coverage era. Both groups show a declining trend: expansion states' model selected a non-camped additive trend (ETS(M,A,N)) while non-expansion states selected a damped trend (ETS(M, Ad, N)), meaning the model expects the non-expansion decline to gradually level off rather than continue at a constant rate. Both forecasts project continued enrollment declines over the next 12 months, consistent with ongoing redetermination activity following the 2023 unwinding. However, because the model is only trained on two years of post-unwinding data, confidence is limited in extrapolating the trend forward beyond directional signal, particularly for expansion states where the model did not detect the trend flattening but rather a continuous decline. The wider confidence bands further out in the  forecast reflect this growing uncertainty. 
+
+This projected continued decline isn expansion states is broadly consistent with the narrowing enrollment gap identified in the DiD analysis. If these trends hold, states, particularly expansion states which have larger enrollments, should anticipate continued downward pressure on Medicaid caseloads in the near term. This raises further implications for federal matching fund calculations in state budget planning. 

@@ -53,20 +53,9 @@ Medicaid expansion states maintain a significantly higher enrollment rate than n
 
 ## Limitations
 
-- The DiD interaction is marginal, not conventionally significant at the 0.05 level — results should be described as suggestive, not conclusive.
+- The DiD interaction is marginal, not conventionally significant at the 0.05 level; results should be described as suggestive, not conclusive.
 - The forecast is trained on roughly two years of post-unwinding data, which limits confidence in extrapolating trends further out; confidence intervals widen accordingly.
-- This dataset is state-aggregate; no individual-level demographic data (race, income) was available. Age-based breakdown (child vs. adult enrollment) is a planned extension.
-- Difference-in-differences designs identify association with the timing of a policy change, not definitive proof of causation — other concurrent events could contribute to the observed pattern.
-
-## Repository Structure
-
-```
-├── README.md
-├── medicaid-enrollment-analysis.Rmd     (full analysis: cleaning through forecast)
-├── medicaid-enrollment-analysis.html    (rendered report with plots and output)
-└── data/
-    └── cleaned_enrollment.xlsx
-```
+- Difference-in-differences designs identify association with the timing of a policy change, not definitive proof of causation and other concurrent events could have contributed to the observed pattern.
 
 ## Tools
 

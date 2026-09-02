@@ -3,8 +3,10 @@ title: "Medicaid Enrollment Data Analysis"
 author: "Evelynn Michaud-Spangler"
 date: "2026-08-5"
 output:
-  pdf_document: 
-   latex_engine: xelatex
+  html_document:
+    df_print: paged
+  pdf_document:
+    latex_engine: xelatex
 ---
 
 # 1. Data Preparation
@@ -121,7 +123,7 @@ medicaid_census <- clean %>%
 
 # 2. Descriptive Analysis
 
-I first analyzed state Medicaid enrollment trends per 1,000 residents by Medicaid expansion status to assess differences in enrollment between expansion and non-expansion states over time.
+I first analyzed state Medicaid enrollment trends per 1,000 residents by Medicaid expansion status to assess differences in enrollment between expansion and non-expansion states over time.To confirm this observed difference is statistically meaningful before proceeding to a more rigorous causal design, I conducted a Welch's two-sample t-test comparing mean enrollment rates between expansion and non-expansion states across the full study period
 
 ```{r descriptive}
 
@@ -157,6 +159,17 @@ plot1 <- ggplot(descriptive_tab,
   theme_classic()
 plot1
 
+#Welch's t-test comparing comparing enrollment rates between expansion and non-expansion states
+
+t.test(med_enroll_per_1000 ~ expanded_medicaid, data = medicaid_census)
+#Welch's two-sample t-test confirms the enrollment gap between expansion and  non-expansion states (shown above) is statistically significant
+```
+
+The t-test confirms a statistically significant difference in enrollment rates between expansion and non-expansion states across the full study 
+period (t = -27.08, p < .001), with expansion states averaging roughly 70 more enrollees per 1,000 residents than non-expansion states. The 
+remainder of this analysis uses a difference-in-differences design to test whether this gap changed specifically in response to the 2023 unwinding.
+
+```{r descriptive monthly}
 #Calculate monthly trends
 monthly_trends <- medicaid_census %>%
   group_by(reporting_date, expanded_medicaid) %>%
@@ -195,6 +208,8 @@ plot2 <- ggplot(monthly_trends,
   ) +
   theme_classic()
 plot2
+
+ggsave("annual_enrollment_trends.png", plot = plot2, width = 8, height = 5, dpi = 300)
 
 #Descriptive Statistics
 descriptive_summary <- medicaid_census %>%
@@ -306,6 +321,8 @@ plot3 <- ggplot(
   theme_classic()
 plot3
 
+ggsave("parallel_trend_plot.png", plot = plot3, width = 8, height = 5, dpi = 300)
+
 #Creating monthly time variable for pre and post-unwinding trends analysis
 pre_data <- medicaid_census %>%
   filter(reporting_date < as.Date("2023-04-01")) %>%
@@ -326,7 +343,7 @@ pretrends_model <- lm(
 )
 summary(pretrends_model)
 
-#Regression testing for statistically signficiant differences in enrollment trends pre-unwinding between expansion and non-expansion states after controlling for population size
+#Regression testing for statistically significant differences in enrollment trends pre-unwinding between expansion and non-expansion states after controlling for population size
 pretrend_model2 <- lm(
   med_enroll_per_1000 ~ expanded_medicaid * month + log(Population),
   data = pre_data
@@ -481,8 +498,10 @@ plot4 <- ggplot() +
   theme_classic()
 
 plot4
+
+ggsave("forecast_trend_plot.png", plot = plot4, width = 8, height = 5, dpi = 300)
 ```
 
-Forecast: To project near-term Medicaid enrollment caseloads, I fit an automated exponential smoothing model (ETS) separately for expansion and non-expansion states, trained on the post-unwinding period (April 2023 onward) to reflect the current policy environment rather than the atypical continuous-coverage era. Both groups show a declining trend: expansion states' model selected a non-camped additive trend (ETS(M,A,N)) while non-expansion states selected a damped trend (ETS(M, Ad, N)), meaning the model expects the non-expansion decline to gradually level off rather than continue at a constant rate. Both forecasts project continued enrollment declines over the next 12 months, consistent with ongoing redetermination activity following the 2023 unwinding. However, because the model is only trained on two years of post-unwinding data, confidence is limited in extrapolating the trend forward beyond directional signal, particularly for expansion states where the model did not detect the trend flattening but rather a continuous decline. The wider confidence bands further out in the  forecast reflect this growing uncertainty. 
+Forecast: To project near-term Medicaid enrollment caseloads, I fit an automated exponential smoothing model (ETS) separately for expansion and non-expansion states, trained on the post-unwinding period (April 2023 onward) to reflect the current policy environment rather than the atypical continuous-coverage era. Both groups show a declining trend: expansion states' model selected a non-damped additive trend (ETS(M,A,N)) while non-expansion states selected a damped trend (ETS(M, Ad, N)), meaning the model expects the non-expansion decline to gradually level off rather than continue at a constant rate. Both forecasts project continued enrollment declines over the next 12 months, consistent with ongoing redetermination activity following the 2023 unwinding. However, because the model is only trained on two years of post-unwinding data, confidence is limited in extrapolating the trend forward beyond directional signal, particularly for expansion states where the model did not detect the trend flattening but rather a continuous decline. The wider confidence bands further out in the  forecast reflect this growing uncertainty. 
 
-This projected continued decline isn expansion states is broadly consistent with the narrowing enrollment gap identified in the DiD analysis. If these trends hold, states, particularly expansion states which have larger enrollments, should anticipate continued downward pressure on Medicaid caseloads in the near term. This raises further implications for federal matching fund calculations in state budget planning. 
+This projected continued decline in expansion states is broadly consistent with the narrowing enrollment gap identified in the DiD analysis. If these trends hold, states, particularly expansion states which have larger enrollments, should anticipate continued downward pressure on Medicaid caseloads in the near term. This raises further implications for federal matching fund calculations in state budget planning. 
